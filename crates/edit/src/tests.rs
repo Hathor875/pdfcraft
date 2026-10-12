@@ -234,6 +234,50 @@ fn flattening_keeps_a_note_whose_appearance_is_missing() {
     assert!(flat.contains("q 1 0 0 1 10 10 cm /PCFl0 Do Q"), "{flat}");
 }
 
+/// #1317: a cloudy Square without a stored `/AP` cannot be drawn by the appearance builder
+/// (it supports cloudy borders only for Polygon). Flatten must keep the annotation on the page
+/// instead of silently deleting it. A non-cloudy note on the same page is still flattened.
+#[test]
+fn flattening_keeps_a_cloudy_comment_whose_appearance_cannot_be_built() {
+    let page = stream("", " ");
+    let mut doc = build(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << >> /Contents 4 0 R /Annots [5 0 R 6 0 R] >>",
+        &page,
+        // Cloudy Square — the appearance builder declines this (BE/S = C on non-Polygon).
+        "<< /Type /Annot /Subtype /Square /Rect [10 10 110 60] /C [1 0 0] /IC [1 1 0] /BS << /W 2 >> /BE << /S /C /I 1 >> /Contents (Cloudy box) /F 4 >>",
+        // Supported note without a stored appearance — the builder can draw this.
+        "<< /Type /Annot /Subtype /Text /Rect [150 150 170 170] /Contents (A note) /Name /Comment /Open false /F 0 >>",
+    ]);
+    let n = flatten(&mut doc, &[0], true, false).unwrap();
+    assert_eq!(n, 1, "only the supported note is drawn; the cloudy square is not");
+    let doc = reopen(&doc);
+    let p = &pdfcraft_model::pages(&doc)[0];
+    let annots = p.dict.get(b"Annots").map(|a| doc.resolve(a)).and_then(|a| a.as_array().cloned()).unwrap();
+    assert_eq!(annots.len(), 1, "one annotation survives: the undrawable cloudy square");
+    let surviving = doc.resolve(&annots[0]).as_dict().cloned().unwrap();
+    assert_eq!(surviving.name(b"Subtype"), Some(b"Square".as_slice()), "the surviving annotation is the cloudy Square");
+    assert!(surviving.get(b"Contents").and_then(|c| c.as_string()).is_some(), "the cloudy square's /Contents is preserved");
+    // The note's icon was drawn into page content.
+    let flat = streams(&doc, 0).pop().unwrap();
+    assert!(flat.contains("/PCFl0 Do"), "the note icon is baked into the page: {flat}");
+
+    // A cloudy square *with* a stored usable appearance does flatten.
+    let mut doc2 = build(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << >> /Contents 4 0 R /Annots [5 0 R] >>",
+        &page,
+        "<< /Type /Annot /Subtype /Square /Rect [10 10 110 60] /C [1 0 0] /BE << /S /C /I 1 >> /F 4 /AP << /N 6 0 R >> >>",
+        "<< /Type /XObject /Subtype /Form /BBox [10 10 110 60] /Length 0 >>\nstream\n\nendstream",
+    ]);
+    assert_eq!(flatten(&mut doc2, &[0], true, false).unwrap(), 1, "stored appearance flattens");
+    let doc2 = reopen(&doc2);
+    let p2 = &pdfcraft_model::pages(&doc2)[0];
+    assert!(!p2.dict.contains(b"Annots"), "the cloudy square with AP is removed after drawing");
+}
+
 /// Flattening never makes a `?` permanent: it refuses, changing nothing, a text box without an
 /// appearance whose text Helvetica can't draw (another program's), and a comment or form field
 /// whose appearance PdfCraft drew with `?` (marked `PCUndrawn`). A comment another program drew

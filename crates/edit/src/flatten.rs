@@ -168,8 +168,8 @@ fn flatten_which(doc: &mut Document, pages: &[usize], which: Which) -> Result<us
             if flags & (HIDDEN | NO_VIEW) != 0 || appearance(doc, &d).is_some() {
                 continue;
             }
-            // A subtype this build cannot draw only fails here; it is still removed below. (Text
-            // the standard fonts can't draw was refused before anything changed: `undrawn_on`.)
+            // A subtype this build cannot draw stays on the page with its original
+            // dictionary intact (the second loop skips removal when nothing was drawn).
             let _ = pdfcraft_annot::set_appearance(doc, r);
         }
         for (k, entry) in list.iter().enumerate() {
@@ -185,6 +185,7 @@ fn flatten_which(doc: &mut Document, pages: &[usize], which: Which) -> Result<us
                 continue;
             }
             let rect = nums(doc, d.get(b"Rect")).filter(|r| r.len() == 4).map(|r| [r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3])]);
+            let mut did_draw = false;
             if let (Some(ap), Some(rect)) = (appearance(doc, d), rect) {
                 let form = doc.get(ap).as_dict().cloned().unwrap_or_default();
                 if let Some(m) = placement(doc, &form, rect) {
@@ -192,7 +193,15 @@ fn flatten_which(doc: &mut Document, pages: &[usize], which: Which) -> Result<us
                     content.push_str(&format!("q {} {} {} {} {} {} cm /{name} Do Q\n", n(m[0]), n(m[1]), n(m[2]), n(m[3]), n(m[4]), n(m[5])));
                     xobjects.set(name.into_bytes(), Object::Ref(ap));
                     drawn += 1;
+                    did_draw = true;
                 }
+            }
+            // Only remove the annotation when its appearance was actually drawn into
+            // page content. A comment whose appearance could not be built (e.g. a cloudy
+            // Square the builder declines) must stay on the page rather than being
+            // silently deleted without replacement content.
+            if !did_draw && !widget {
+                continue;
             }
             match entry.as_ref() {
                 Some(r) => {
