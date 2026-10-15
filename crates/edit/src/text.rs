@@ -1686,6 +1686,53 @@ pub fn rewrite_block(doc: &mut Document, page: usize, block: usize, text: Option
     rewrite_block_with_limit(doc, page, block, text, style, MAX_TYPE3_GLYPHS)
 }
 
+/// Whether a one-row left-to-right paragraph is right-aligned, and so should keep its right edge
+/// as text is added to it (#2582). Two pieces of evidence, both read off the page:
+///
+/// - its right edge sits on the right margin;
+/// - or its right edge lines up with the right edge of other text on the page, while its own left
+///   edge lines up with nothing.
+///
+/// A row that fits neither keeps growing to the right from its left edge, as before. That is the
+/// safe answer: anchoring a left-aligned row on the wrong edge would move text in documents that
+/// were fine. So a row aligned to an arbitrary right edge with nothing on the page to line up with
+/// is not recognised — the paragraph box carries no alignment of its own, and guessing one would
+/// move text that is currently left where the author put it.
+///
+/// The tolerance is a few points — enough for two edges that were meant to match to differ by
+/// rounding, and no more. It is deliberately not the text size, which the document chooses: a
+/// font stated at a hundred points would swallow every row on the page.
+fn right_anchored_row(b: &TextBlock, lines: &[TextLine], right_margin: f64) -> bool {
+    // A turned row's edges are not horizontal, so its right edge is not where it was put. The
+    // angle comes out of `atan2`, so an upright row carries a residue rather than a plain zero.
+    if b.lines.len() != 1 || b.rotation.abs() > 0.01 {
+        return false;
+    }
+    let Some(row) = b.lines.first().and_then(|i| lines.get(*i)) else { return false };
+    let tol = row.size.abs().clamp(0.5, 4.0);
+    let (left, right) = (b.rect[0], b.rect[2]);
+    if !left.is_finite() || !right.is_finite() || !right_margin.is_finite() {
+        return false;
+    }
+    if (right - right_margin).abs() <= tol {
+        return true;
+    }
+    let mut right_aligned = false;
+    let mut left_aligned = false;
+    for (i, other) in lines.iter().enumerate() {
+        if b.lines.contains(&i) {
+            continue;
+        }
+        if (other.rect[2] - right).abs() <= tol {
+            right_aligned = true;
+        }
+        if (other.rect[0] - left).abs() <= tol {
+            left_aligned = true;
+        }
+    }
+    right_aligned && !left_aligned
+}
+
 /// [`rewrite_block`] with the most unique characters one generated font may hold (tests lower it).
 pub(crate) fn rewrite_block_with_limit(
     doc: &mut Document,
@@ -1765,7 +1812,8 @@ pub(crate) fn rewrite_block_with_limit(
     // Right-to-left text (more Hebrew or Arabic letters than Latin) is right-aligned unless an
     // alignment is asked for, and a single right-to-left line keeps its right edge as it grows.
     let rtl = crate::bidi::rtl_base(&text);
-    let anchored_right = rtl && style.width.is_none() && members.len() == 1;
+    let crop = p.crop(doc);
+    let anchored_right = (rtl || right_anchored_row(&b, &lines, crop[2] - 36.0)) && style.width.is_none() && members.len() == 1;
     // A paragraph keeps its width (or takes the one asked for); a single line grows to the right
     // (to the left when right-to-left), up to the page's margin.
     let width = match style.width {
@@ -1779,7 +1827,7 @@ pub(crate) fn rewrite_block_with_limit(
     if !width.is_finite() {
         return Err(EditError::Invalid("the paragraph's width must be a number".into()));
     }
-    let align = style.align.or(rtl.then_some(crate::added::Align::Right));
+    let align = style.align.or((rtl || anchored_right).then_some(crate::added::Align::Right));
     // Where a right-aligned line ends, from the paragraph's left edge (user space).
     let right_edge = if anchored_right { (b.rect[2] - b.rect[0]).max(0.0) } else { width };
     // The move and the width are checked here, before the fallback fonts are written: a refused

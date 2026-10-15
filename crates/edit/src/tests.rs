@@ -2116,6 +2116,102 @@ fn hebrew_edits_are_drawn_right_to_left_and_keep_their_right_edge() {
     assert!((line.rect[0] - before[0]).abs() < 0.5, "left-aligned: {:?} vs {before:?}", line.rect);
 }
 
+/// #2582: a one-row paragraph aligned to the right margin kept its left edge, so longer text ran
+/// past the edge it was aligned to and then wrapped into whatever column was left over.
+#[test]
+fn a_one_row_paragraph_aligned_to_the_right_margin_keeps_its_right_edge() {
+    // The page is 600 wide, so the right margin is at 564, and "15 October 2026" is 89.388 wide.
+    let row = "BT /F1 12 Tf 474.612 740 Td (15 October 2026) Tj ET";
+    let before = text::text_lines(&text_page(row), 0).unwrap()[0].rect;
+    assert!((before[2] - 564.0).abs() < 0.01, "the row starts on the right margin: {before:?}");
+
+    // Shorter text stays at the old right edge, and starts further right.
+    let mut doc = text_page(row);
+    assert_eq!(text::replace_block(&mut doc, 0, 0, "October").unwrap().substituted, None);
+    let line = text::text_lines(&reopen(&doc), 0).unwrap().swap_remove(0);
+    assert_eq!(line.text, "October");
+    assert!((line.rect[2] - before[2]).abs() < 0.5, "right edge {} → {}", before[2], line.rect[2]);
+    assert!(line.rect[0] > before[0] + 1.0, "shorter text starts further right: {:?} vs {before:?}", line.rect);
+
+    // Longer text grows to the left; once it no longer fits, every row ends at the same edge and
+    // none of them starts left of the left margin.
+    let mut doc = text_page(row);
+    text::replace_block(
+        &mut doc,
+        0,
+        0,
+        "15 October 2026 with many more words added so that this single row has to become much much longer than the page is wide",
+    )
+    .unwrap();
+    let lines = text::text_lines(&reopen(&doc), 0).unwrap();
+    assert!(lines.len() > 1, "it has to wrap: {lines:?}");
+    for line in &lines {
+        assert!((line.rect[2] - before[2]).abs() < 0.5, "row right edge {} → {}", before[2], line.rect[2]);
+        assert!(line.rect[0] >= 36.0 - 0.5, "row runs off the left margin: {:?}", line.rect);
+    }
+}
+
+/// #2582: the other evidence that a one-row paragraph is right-aligned — its right edge lines up
+/// with other text's right edge on the page, and its own left edge lines up with nothing.
+#[test]
+fn a_one_row_paragraph_level_with_other_right_edges_keeps_its_right_edge() {
+    // Two paragraphs 140pt apart, so they are not one block: both end at x = 400.
+    let page = "BT /F1 12 Tf 333.964 740 Td (Chapter one) Tj ET \
+                BT /F1 12 Tf 351.976 600 Td (Contents) Tj ET";
+    let doc = text_page(page);
+    let blocks = text::text_blocks(&doc, 0).unwrap();
+    assert_eq!(blocks.len(), 2, "the two rows are separate paragraphs: {blocks:?}");
+    let before = blocks[0].rect;
+    assert!((before[2] - 400.0).abs() < 0.01, "{before:?}");
+
+    let mut doc = text_page(page);
+    text::replace_block(&mut doc, 0, 0, "Chapter one and a good deal more besides").unwrap();
+    let lines = text::text_lines(&reopen(&doc), 0).unwrap();
+    let edited = lines.iter().find(|l| l.rect[1] > 700.0).expect("the edited row");
+    assert!((edited.rect[2] - before[2]).abs() < 0.5, "right edge {} → {}", before[2], edited.rect[2]);
+    assert!(edited.rect[0] < before[0] - 1.0, "longer text grows left: {:?} vs {before:?}", edited.rect);
+}
+
+/// The other half of #2582: a row with no evidence of right alignment keeps growing to the right
+/// from its left edge. Anchoring it on the wrong edge would move text in documents that are fine.
+#[test]
+fn a_one_row_paragraph_at_the_left_margin_still_grows_to_the_right() {
+    let row = "BT /F1 12 Tf 36 700 Td (Dear reader,) Tj ET";
+    let before = text::text_lines(&text_page(row), 0).unwrap()[0].rect;
+    assert!((before[0] - 36.0).abs() < 0.01, "{before:?}");
+
+    let mut doc = text_page(row);
+    text::replace_block(&mut doc, 0, 0, "Dear reader, here is a much longer salutation that runs on").unwrap();
+    let line = text::text_lines(&reopen(&doc), 0).unwrap().swap_remove(0);
+    assert!((line.rect[0] - before[0]).abs() < 0.5, "left edge {} → {}", before[0], line.rect[0]);
+    assert!(line.rect[2] > before[2] + 1.0, "longer text grows right: {:?} vs {before:?}", line.rect);
+    assert!(line.rect[2] <= 564.0 + 0.5, "and stops at the right margin: {:?}", line.rect);
+}
+
+/// The tolerance that recognises a right-aligned row is a rounding tolerance, not the text size.
+/// A document states its own font size, and one claiming a large size must not be able to widen
+/// that tolerance until every row on the page looks right-aligned (#2582).
+#[test]
+fn an_oversized_font_does_not_make_every_row_look_right_aligned() {
+    // 60pt: "Dear reader," is 336.8 wide, so this row runs from 280 to 616.8 — within 53pt of the
+    // right margin at 564, which a tolerance taken from the font size (60) would swallow.
+    let row = "BT /F1 60 Tf 280 700 Td (Dear reader,) Tj ET";
+    let before = text::text_lines(&text_page(row), 0).unwrap()[0].rect;
+    assert!((before[0] - 280.0).abs() < 0.01, "{before:?}");
+    assert!((before[2] - 616.8).abs() < 0.1, "{before:?}");
+    assert!((616.8_f64 - 564.0).abs() < 60.0, "the size alone would match the right margin");
+
+    // So it keeps its left edge: every row it wraps to starts at the old left edge, rather than
+    // ending at the old right one.
+    let mut doc = text_page(row);
+    text::replace_block(&mut doc, 0, 0, "Dear reader, and hello").unwrap();
+    let lines = text::text_lines(&reopen(&doc), 0).unwrap();
+    assert!(lines.len() > 1, "it has to wrap to show the difference: {lines:?}");
+    for line in &lines {
+        assert!((line.rect[0] - before[0]).abs() < 1.0, "row left edge {} → {}", before[0], line.rect[0]);
+    }
+}
+
 /// Letters the page's font lacks are drawn with the Hebrew face from craft-fonts; a build
 /// without it says so and changes nothing. Hebrew points are refused, not misdrawn.
 #[test]
